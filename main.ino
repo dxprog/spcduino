@@ -22,10 +22,6 @@
 
 #define NOP __asm__ __volatile__ ("nop\n\t")
 
-// Convenience arrays for looping over data pins. Super lazy stuff
-const byte PINS_READ[BYTE_LEN]  = { D7, D6, D5, D4, D3, D2, D1, D0 };
-const byte PINS_WRITE[BYTE_LEN] = { D0, D1, D2, D3, D4, D5, D6, D7 };
-
 // DSP boot loader
 static byte dspLoader[] =
 { //For loading the 128 byte DSP ram. DO NOT CHANGE.
@@ -37,11 +33,11 @@ static byte dspLoader[] =
   0xBC,             //        Inc A
   0x10, 0xF2,       //        Bpl START
 
-  0x8F, 0x05, 0xFC, //      Mov [0FCh], #timer_2
-  0x8F, 0x80, 0xFB, //      Mov [0FBh], #timer_1
-  0x8F, 0x27, 0xFA, //      Mov [0FAh], #timer_0
+  0x8F, 0xFF, 0xFC, //      Mov [0FCh], #timer_2
+  0x8F, 0xFF, 0xFB, //      Mov [0FBh], #timer_1
+  0x8F, 0x10, 0xFA, //      Mov [0FAh], #timer_0
 
-  0xCD, 0xCA,       //      Mov X, #stack_pointer
+  0xCD, 0xF9,       //      Mov X, #stack_pointer
   0xBD,             //      Mov SP, X
 
   0x2F, 0xAB,       //        Bra 0FFC9h  ;Right when IPL puts AA-BB on the IO ports and waits for CC.
@@ -162,17 +158,20 @@ void writeChunk(byte *data, unsigned short len) {
 
 void readSerialBuffer(byte *buffer, unsigned short len) {
   int bufferPos = 0;
+  int checksum = 0;
   while (bufferPos < len) {
     while (Serial.available() < 32);
     for (int i = 0; i < 32; i++) {
       buffer[bufferPos] = Serial.read();
+      checksum = (checksum + buffer[bufferPos]) & 0xFF;
       bufferPos++;
     }
   }
 
   Serial.print("Read 0x");
   Serial.print(bufferPos, HEX);
-  Serial.println(" bytes into buffer");
+  Serial.print(" bytes into buffer with a checksum: ");
+  Serial.println(checksum);
 }
 
 void initDsp() {
@@ -182,22 +181,22 @@ void initDsp() {
   readSerialBuffer(buffer, 128);
 
   // Write the DSP loader
-  writeData(PORT2, 2);
-  writeData(PORT3, 0);
-  writeData(PORT1, 1);
+  writeData(PORT2, 0x02);
+  writeData(PORT3, 0x00);
+  writeData(PORT1, 0x01);
   writePortZeroAndWait(0xCC);
   writeChunk(dspLoader, 28);
 
   Serial.println("DSP loader written");
 
   // Bit twiddling
-  buffer[0x4C] = 0;
+  buffer[0x4C] = 0x00;
   buffer[0x6C] = 0x60;
 
   // Send the DSP data
-  writeData(PORT2, 2);
-  writeData(PORT3, 0);
-  writeData(PORT1, 0);
+  writeData(PORT2, 0x02);
+  writeData(PORT3, 0x00);
+  writeData(PORT1, 0x00);
   writePortZeroAndWait(sizeof(dspLoader) + 1);
   writeChunk(buffer, 127);
 
@@ -218,7 +217,7 @@ void loop() {
     state = STATE_TXFR;
   } else if (state == STATE_TXFR) {
     unsigned char buffer[0xFF];
-    Serial.println("Receiving SPC data (SEND)");
+    Serial.println("Receiving zero page data (SEND)");
     readSerialBuffer(buffer, 0x100);
 
     // Write page 0 of SPC data
@@ -228,13 +227,15 @@ void loop() {
     writePortZeroAndWait(0xCC);
 
     // Leave the first two bytes alone and also don't touch the register addresses
+    unsigned short checksum = 0;
     Serial.println("Sending zero page data");
     for (int i = 2; i < 0xF0; i++) {
       writeData(PORT1, buffer[i]);
       writePortZeroAndWait(i - 2);
     }
 
-    Serial.println("Zero page data written (SEND)");
+    Serial.println("Zero page data written");
+    Serial.println("Receiving SPC data (SEND)");
 
     writeData(PORT1, 1);
     writeData(PORT2, 0);
@@ -242,7 +243,7 @@ void loop() {
     unsigned char port0Check = readData(PORT0) + 2;
     writePortZeroAndWait(port0Check);
 
-    unsigned short checksum = 0;
+    checksum = 0;
     unsigned short currentAddr = 0x100;
     unsigned long start = micros();
     while (currentAddr > 0) {
@@ -258,8 +259,10 @@ void loop() {
 
     Serial.println(micros() - start);
 
-    Serial.println("SPC data written. Starting playback");
-    writeData(PORT2, 0xC0);
+    Serial.print("SPC data written (");
+    Serial.print(checksum);
+    Serial.println("). Starting playback");
+    writeData(PORT2, 0x90);
     writeData(PORT3, 0xFF);
     writeData(PORT1, 0);
     port0Check = readData(PORT0) + 2;
@@ -269,17 +272,15 @@ void loop() {
     unsigned short bail = 512;
     while (readData(PORT0) != 0x53 && --bail > 0);
 
+    writeData(PORT0, 0x73);
+    writeData(PORT1, 0x00);
+    writeData(PORT2, 0xFF);
+    writeData(PORT3, 0x00);
+
     if (bail == 0) {
       Serial.println("Go to bed");
       Serial.println(checksum);
-      debugPorts();
     }
-
-    writeData(PORT0, 0x00);
-    writeData(PORT1, 0x00);
-    writeData(PORT2, 0x72);
-    writeData(PORT3, 0x04);
-
     state = 100;
   }
 }
