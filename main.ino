@@ -1,26 +1,26 @@
-#define D0      2
-#define D1      3
-#define D2      4
-#define D3      5
-#define D4      6
-#define D5      7
-#define D6      8
-#define D7      9
-#define PA0    10
-#define PA1    11
-#define PA6    12
-#define PA7    13
+#include "spc700.h"
+
 #define READ   A0
 #define RESET  A1
 #define WRITE  A2
-
-#define PORT0    0
-#define PORT1    1
-#define PORT2    2
-#define PORT3    3
-#define BYTE_LEN 8
+#define PA0    10
+#define PA1    11
 
 #define NOP __asm__ __volatile__ ("nop\n\t")
+
+// Commands that can be issued by spc-player
+#define CMD_RESET        0
+#define CMD_LOAD_DSP     1
+#define CMD_WRITE_CHUNK  2
+#define CMD_PLAY         3
+
+// Responses to send back to spc-player
+#define RSP_OKAY         0
+#define RSP_FAIL         1
+
+#define STATE_INIT  0
+#define STATE_READY 1
+#define STATE_TXFR  2
 
 // DSP boot loader
 static byte dspLoader[] =
@@ -43,10 +43,6 @@ static byte dspLoader[] =
   0x2F, 0xAB,       //        Bra 0FFC9h  ;Right when IPL puts AA-BB on the IO ports and waits for CC.
 };
 
-#define STATE_INIT  0
-#define STATE_READY 1
-#define STATE_TXFR  2
-
 byte state = STATE_INIT;
 byte lastPort0 = 0;
 byte currentAddress = 0;
@@ -58,102 +54,10 @@ void setup() {
   pinMode(RESET, OUTPUT);
   pinMode(PA0, OUTPUT);
   pinMode(PA1, OUTPUT);
-  pinMode(PA6, OUTPUT);
-  pinMode(PA7, OUTPUT);
-
-  digitalWrite(PA6, HIGH);
-  digitalWrite(PA7, LOW);
 
   Serial.flush();
   Serial.begin(148986);
   Serial.println("Begin");
-}
-
-void changeDataDirection(byte direction) {
-  DDRD = (DDRD & 0x03) | (direction == OUTPUT ? 0xFC : 0x00);
-  DDRB = (DDRB & 0xFC) | (direction == OUTPUT ? 0x03 : 0x00);
-}
-
-byte readData(byte addr) {
-  // Set the address
-  PORTB = (PORTB & B11110011) | ((addr & 0x03) << 2);
-  digitalWrite(READ, LOW);
-  NOP;
-
-  // Read the data straight off the registers
-  changeDataDirection(INPUT);
-  unsigned char retVal = ((PINB & 0x03) << 6) | ((PIND & 0xFC) >> 2);
-
-  changeDataDirection(OUTPUT);
-  digitalWrite(READ, HIGH);
-
-  return retVal;
-}
-
-void writeBus(byte value) {
-  digitalWrite(WRITE, value);
-}
-
-void writeDataRaw(byte addr, byte data) {
-  changeDataDirection(OUTPUT);
-
-  // Set the address and the upper two bits of data
-  PORTB = (PORTB & 0xF0) | ((addr & 0x03) << 2) | ((data & 0xC0) >> 6);
-
-  // Lower six bits
-  PORTD = (PORTD & 0x03) | ((data & 0x3F) << 2);
-}
-
-void writeData(byte addr, byte data) {
-  writeDataRaw(addr, data);
-  writeBus(LOW);
-  NOP;
-  writeBus(HIGH);
-}
-
-void waitForPortZero(unsigned char value) {
-  while (readData(PORT0) != value);
-}
-
-void writePortZeroAndWait(unsigned char value) {
-  writeData(PORT0, value);
-  waitForPortZero(value);
-}
-
-void debugPorts() {
-  byte value = readData(0x0);
-  Serial.print("Value on PORT0: ");
-  Serial.println(value, HEX);
-  value = readData(0x1);
-  Serial.print("Value on PORT1: ");
-  Serial.println(value, HEX);
-  value = readData(0x2);
-  Serial.print("Value on PORT2: ");
-  Serial.println(value, HEX);
-  value = readData(0x3);
-  Serial.print("Value on PORT3: ");
-  Serial.println(value, HEX);
-}
-
-void resetSPC() {
-  digitalWrite(RESET, LOW);
-  delay(1);
-  digitalWrite(RESET, HIGH);
-  byte port0 = 0;
-  byte port1 = 0;
-  while (port0 != 0xAA && port1 != 0xBB) {
-    port0 = readData(PORT0);
-    port1 = readData(PORT1);
-  }
-  Serial.println("SPC reset!");
-}
-
-void writeChunk(byte *data, unsigned short len) {
-  for (int i = 0; i < len; i++) {
-    writeData(PORT1, data[i]);
-    writeData(PORT0, i);
-    while (readData(PORT0) != i);
-  }
 }
 
 void readSerialBuffer(byte *buffer, unsigned short len) {
@@ -181,11 +85,12 @@ void initDsp() {
   readSerialBuffer(buffer, 128);
 
   // Write the DSP loader
-  writeData(PORT2, 0x02);
-  writeData(PORT3, 0x00);
-  writeData(PORT1, 0x01);
-  writePortZeroAndWait(0xCC);
-  writeChunk(dspLoader, 28);
+  spc_write(PORT_2, 0x02);
+  spc_write(PORT_3, 0x00);
+  spc_write(PORT_1, 0x01);
+  spc_write(PORT_0, 0xCC);
+  spc_zero_wait(0xCC);
+  spc_write_chunk(dspLoader, 28);
 
   Serial.println("DSP loader written");
 
@@ -194,23 +99,24 @@ void initDsp() {
   buffer[0x6C] = 0x60;
 
   // Send the DSP data
-  writeData(PORT2, 0x02);
-  writeData(PORT3, 0x00);
-  writeData(PORT1, 0x00);
-  writePortZeroAndWait(sizeof(dspLoader) + 1);
-  writeChunk(buffer, 127);
+  spc_write(PORT_2, 0x02);
+  spc_write(PORT_3, 0x00);
+  spc_write(PORT_1, 0x00);
+  spc_write(PORT_0, 29);
+  spc_zero_wait(29);
+  spc_write_chunk(buffer, 127);
 
   // Write the last byte and wait for IPL ROM to cycle back around
-  writeData(PORT1, buffer[127]);
-  writeData(PORT0, 127);
-  waitForPortZero(0xAA);
+  spc_write(PORT_1, buffer[127]);
+  spc_write(PORT_0, 127);
+  spc_zero_wait(0xAA);
 
   Serial.println("DSP data written");
 }
 
 void loop() {
   if (state == STATE_INIT) {
-    resetSPC();
+    spc_reset();
     state = STATE_READY;
   } else if (state == STATE_READY && Serial.available()) {
     initDsp();
@@ -221,27 +127,30 @@ void loop() {
     readSerialBuffer(buffer, 0x100);
 
     // Write page 0 of SPC data
-    writeData(PORT2, 2);
-    writeData(PORT3, 0);
-    writeData(PORT1, 1);
-    writePortZeroAndWait(0xCC);
+    spc_write(PORT_2, 2);
+    spc_write(PORT_3, 0);
+    spc_write(PORT_1, 1);
+    spc_write(PORT_0, 0xCC);
+    spc_zero_wait(0xCC);
 
     // Leave the first two bytes alone and also don't touch the register addresses
     unsigned short checksum = 0;
     Serial.println("Sending zero page data");
     for (int i = 2; i < 0xF0; i++) {
-      writeData(PORT1, buffer[i]);
-      writePortZeroAndWait(i - 2);
+      spc_write(PORT_1, buffer[i]);
+      spc_write(PORT_0, i - 2);
+      spc_zero_wait(i - 2);
     }
 
     Serial.println("Zero page data written");
     Serial.println("Receiving SPC data (SEND)");
 
-    writeData(PORT1, 1);
-    writeData(PORT2, 0);
-    writeData(PORT3, 1);
-    unsigned char port0Check = readData(PORT0) + 2;
-    writePortZeroAndWait(port0Check);
+    spc_write(PORT_1, 1);
+    spc_write(PORT_2, 0);
+    spc_write(PORT_3, 1);
+    unsigned char port0Check = spc_read(PORT_0) + 2;
+    spc_write(PORT_0, port0Check);
+    spc_zero_wait(port0Check);
 
     checksum = 0;
     unsigned short currentAddr = 0x100;
@@ -249,8 +158,10 @@ void loop() {
     while (currentAddr > 0) {
       while (Serial.available() == 0);
       unsigned char data = Serial.read();
-      writeData(PORT1, data);
-      writePortZeroAndWait(currentAddr & 0xFF);
+      port0Check = currentAddr & 0xFF;
+      spc_write(PORT_1, data);
+      spc_write(PORT_0, port0Check);
+      spc_zero_wait(port0Check);
 
       checksum = (checksum + data) & 0xFF;
 
@@ -262,20 +173,21 @@ void loop() {
     Serial.print("SPC data written (");
     Serial.print(checksum);
     Serial.println("). Starting playback");
-    writeData(PORT2, 0x90);
-    writeData(PORT3, 0xFF);
-    writeData(PORT1, 0);
-    port0Check = readData(PORT0) + 2;
-    writePortZeroAndWait(port0Check);
+    spc_write(PORT_2, 0x90);
+    spc_write(PORT_3, 0xFF);
+    spc_write(PORT_1, 0);
+    port0Check = spc_read(PORT_0) + 2;
+    spc_write(PORT_0, port0Check);
+    spc_zero_wait(port0Check);
     Serial.println("I've done all I can, boss");
 
     unsigned short bail = 512;
-    while (readData(PORT0) != 0x53 && --bail > 0);
+    while (spc_read(PORT_0) != 0x53 && --bail > 0);
 
-    writeData(PORT0, 0x73);
-    writeData(PORT1, 0x00);
-    writeData(PORT2, 0xFF);
-    writeData(PORT3, 0x00);
+    spc_write(PORT_0, 0x73);
+    spc_write(PORT_1, 0x00);
+    spc_write(PORT_2, 0xFF);
+    spc_write(PORT_3, 0x00);
 
     if (bail == 0) {
       Serial.println("Go to bed");
