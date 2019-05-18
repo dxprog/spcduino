@@ -24,17 +24,9 @@ void spc_reset() {
 
   // Wait for ports zero and one to read 0xAA and 0xBB respectively. This
   // is the sign that IPL ROM has finished and is waiting for commands.
-  uint8_t bail = 255;
-  while (port0 != 0xAA && port1 != 0xBB && bail > 0) {
+  while (port0 != 0xAA && port1 != 0xBB) {
     port0 = spc_read(PORT_0);
     port1 = spc_read(PORT_1);
-    bail--;
-  }
-
-  if (bail == 0) {
-    Serial.println("Failed to reset");
-    Serial.println(port0, HEX);
-    Serial.println(port1, HEX);
   }
 }
 
@@ -102,4 +94,52 @@ void spc_write_chunk(uint8_t *data, uint16_t len) {
  */
 void spc_zero_wait(uint8_t value) {
   while (spc_read(PORT_0) != value);
+}
+
+/**
+ * Sets the SPC up for a fresh new transfer
+ *
+ * @param {uint16_t} addr The address to begin transferring to
+ */
+void spc_begin_transfer(uint16_t addr) {
+  spc_write(PORT_2, addr & 0xFF);
+  spc_write(PORT_3, addr >> 8);
+  spc_write(PORT_1, 0x01);
+  spc_write(PORT_0, 0xCC);
+  spc_zero_wait(0xCC);
+}
+
+/**
+ * Tells the SPC that a new chunk is beginning or the transfer is ended.
+ * This is defined solely by the value passed to port 1.
+ *
+ * @param {uint16_t} The addres to transfer to or execute from
+ * @param {bool} end Is this the end of the transfer
+ */
+void spc_set_transfer_phase(uint16_t addr, bool transfer_end) {
+  spc_write(PORT_2, addr & 0xFF);
+  spc_write(PORT_3, addr >> 8);
+  spc_write(PORT_1, transfer_end ? 0x00 : 0x01);
+  uint8_t port_zero_check = spc_read(PORT_0) + 2;
+  port_zero_check = port_zero_check == 0 ? 2 : port_zero_check;
+  spc_write(PORT_0, port_zero_check);
+  spc_zero_wait(port_zero_check);
+}
+
+/**
+ * Gets the SPC ready to write a new chunk of data
+ *
+ * @param {uint16_t} addr The address to begin transferring to
+ */
+void spc_begin_chunk(uint16_t addr) {
+  spc_set_transfer_phase(addr, false);
+}
+
+/**
+ * Ends a data transfer with the SPC and begins execution
+ *
+ * @param {uint16_t} addr The address to begin execution at
+ */
+void spc_end_transfer(uint16_t addr) {
+  spc_set_transfer_phase(addr, true);
 }

@@ -19,5 +19,8 @@ uint8_t spc_read(uint8_t addr);
 void spc_write(uint8_t addr, uint8_t value);
 void spc_write_chunk(uint8_t *data, uint16_t len);
 void spc_zero_wait(uint8_t value);
+void spc_begin_transfer(uint16_t addr);
+void spc_begin_chunk(uint16_t addr);
+void spc_end_transfer(uint16_t addr);
 
 #endif

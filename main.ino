@@ -85,11 +85,7 @@ void initDsp() {
   readSerialBuffer(buffer, 128);
 
   // Write the DSP loader
-  spc_write(PORT_2, 0x02);
-  spc_write(PORT_3, 0x00);
-  spc_write(PORT_1, 0x01);
-  spc_write(PORT_0, 0xCC);
-  spc_zero_wait(0xCC);
+  spc_begin_transfer(0x0002);
   spc_write_chunk(dspLoader, 28);
 
   Serial.println("DSP loader written");
@@ -98,12 +94,8 @@ void initDsp() {
   buffer[0x4C] = 0x00;
   buffer[0x6C] = 0x60;
 
-  // Send the DSP data
-  spc_write(PORT_2, 0x02);
-  spc_write(PORT_3, 0x00);
-  spc_write(PORT_1, 0x00);
-  spc_write(PORT_0, 29);
-  spc_zero_wait(29);
+  // End the transfer and run the DSP loader
+  spc_end_transfer(0x0002);
   spc_write_chunk(buffer, 127);
 
   // Write the last byte and wait for IPL ROM to cycle back around
@@ -127,11 +119,7 @@ void loop() {
     readSerialBuffer(buffer, 0x100);
 
     // Write page 0 of SPC data
-    spc_write(PORT_2, 2);
-    spc_write(PORT_3, 0);
-    spc_write(PORT_1, 1);
-    spc_write(PORT_0, 0xCC);
-    spc_zero_wait(0xCC);
+    spc_begin_transfer(0x0002);
 
     // Leave the first two bytes alone and also don't touch the register addresses
     unsigned short checksum = 0;
@@ -145,16 +133,12 @@ void loop() {
     Serial.println("Zero page data written");
     Serial.println("Receiving SPC data (SEND)");
 
-    spc_write(PORT_1, 1);
-    spc_write(PORT_2, 0);
-    spc_write(PORT_3, 1);
-    unsigned char port0Check = spc_read(PORT_0) + 2;
-    spc_write(PORT_0, port0Check);
-    spc_zero_wait(port0Check);
+    spc_begin_chunk(0x0100);
 
     checksum = 0;
     unsigned short currentAddr = 0x100;
     unsigned long start = micros();
+    uint8_t port0Check = 0;
     while (currentAddr > 0) {
       while (Serial.available() == 0);
       unsigned char data = Serial.read();
@@ -173,19 +157,14 @@ void loop() {
     Serial.print("SPC data written (");
     Serial.print(checksum);
     Serial.println("). Starting playback");
-    spc_write(PORT_2, 0x90);
-    spc_write(PORT_3, 0xFF);
-    spc_write(PORT_1, 0);
-    port0Check = spc_read(PORT_0) + 2;
-    spc_write(PORT_0, port0Check);
-    spc_zero_wait(port0Check);
+    spc_end_transfer(0xFF90);
     Serial.println("I've done all I can, boss");
 
     unsigned short bail = 512;
     while (spc_read(PORT_0) != 0x53 && --bail > 0);
 
     spc_write(PORT_0, 0x73);
-    spc_write(PORT_1, 0x00);
+    spc_write(PORT_1, 0xFE);
     spc_write(PORT_2, 0xFF);
     spc_write(PORT_3, 0x00);
 
