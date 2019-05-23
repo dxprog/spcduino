@@ -184,7 +184,7 @@ void cmd_play() {
     return;
   }
 
-  bool arePortsZero = params[2] == 0 && params[3] == 0 && params[4] == 0 && params[5] == 0;
+  bool arePortsZero = !params[2] && !params[3] && !params[4] && !params[5];
 
   // End the transfer and JMP to the boot loader
   spc_end_transfer((params[1] << 8) | params[0]);
@@ -193,7 +193,7 @@ void cmd_play() {
   // TODO: Actually understand what this is about
   if (arePortsZero) {
     spc_write(PORT_3, 1);
-    spc_write(PORT_0, 0);
+    spc_write(PORT_0, 1);
   }
 
   // Wait for the boot good code
