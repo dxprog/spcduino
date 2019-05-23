@@ -11,8 +11,9 @@
 // Commands that can be issued by spc-player
 #define CMD_RESET        1
 #define CMD_LOAD_DSP     2
-#define CMD_WRITE_CHUNK  3
-#define CMD_PLAY         4
+#define CMD_START_SPC    3
+#define CMD_SPC_CHUNK    4
+#define CMD_PLAY         5
 
 // Responses to send back to spc-player
 #define RSP_OKAY         1
@@ -26,6 +27,7 @@
 
 #define DSP_LOADER_SIZE   28
 #define DSP_DATA_SIZE     128
+#define ZERO_PAGE_SIZE    237 // 0xEF - 2
 
 byte state = STATE_INIT;
 
@@ -87,7 +89,6 @@ void cmd_reset() {
 void cmd_load_dsp() {
   // Receive the DSP loader
   uint8_t loaderProgram[28];
-  uint8_t expectedChecksum;
   if (!read_serial_buffer(loaderProgram, 28)) {
     return;
   }
@@ -117,6 +118,96 @@ void cmd_load_dsp() {
   Serial.write(RSP_OKAY);
 }
 
+/**
+ * Begins transferring the program data to the SPC with zero page data
+ *
+ * @param {uint8_t[ZERO_PAGE_SIZE]} zeroPage The zero page data
+ */
+void cmd_start_spc() {
+  // We're going to get zero page data, so retrive that first
+  uint8_t zeroPage[ZERO_PAGE_SIZE];
+  if (!read_serial_buffer(zeroPage, ZERO_PAGE_SIZE)) {
+    return;
+  }
+
+  // Start a new transfer
+  spc_begin_transfer(0x0002);
+  spc_write_chunk(zeroPage, ZERO_PAGE_SIZE);
+  Serial.write(RSP_OKAY);
+}
+
+/**
+ * Uses an already started transfer to send data to the SPC
+ * starting at the specified address
+ *
+ * @param {uint16_t} addr Little endian encoded address to start transferring at
+ * @param {uint8_t} len The length of data to transfer
+ * @param {uint8_t *} data The data to transfer
+ */
+void cmd_spc_chunk() {
+  // Read in the transfer parameters
+  uint8_t params[3];
+  if (!read_serial_buffer(params, 3)) {
+    return;
+  }
+  Serial.write(RSP_OKAY);
+
+  uint16_t addr = (params[1] << 8) | params[0];
+  uint8_t len = params[2];
+
+  // If the data is zero length, bail
+  if (len == 0) {
+    return;
+  }
+
+  // Begin transferring the data from serial
+  uint8_t buffer[len];
+  if (!read_serial_buffer(buffer, len)) {
+    return;
+  }
+
+  // And send it off to the SPC
+  spc_begin_chunk(addr);
+  spc_write_chunk(buffer, len);
+  Serial.write(RSP_OKAY);
+}
+
+/**
+ * Begins playback of the SPC
+ *
+ * @param {uint16_t} bootAddr Little endian encoded address of the program boot loader
+ * @param {uint8_t[4]} portValues The values to reset ports 0 - 3 to
+ */
+void cmd_play() {
+  uint8_t params[6];
+  if (!read_serial_buffer(params, 6)) {
+    return;
+  }
+
+  bool arePortsZero = params[2] == 0 && params[3] == 0 && params[4] == 0 && params[5] == 0;
+
+  // End the transfer and JMP to the boot loader
+  spc_end_transfer((params[1] << 8) | params[0]);
+
+  // If all the ports were zero, write these values out before waiting for the boot code.
+  // TODO: Actually understand what this is about
+  if (arePortsZero) {
+    spc_write(PORT_3, 1);
+    spc_write(PORT_0, 0);
+  }
+
+  // Wait for the boot good code
+  spc_zero_wait(0x53);
+
+  // Restore the original port values
+  spc_write(PORT_0, params[2]);
+  spc_write(PORT_1, params[3]);
+  spc_write(PORT_2, params[4]);
+  spc_write(PORT_3, params[5]);
+
+  Serial.write(RSP_OKAY);
+}
+
 void loop() {
 
   // Wait for a command to show up on serial
@@ -130,79 +221,16 @@ void loop() {
       case CMD_LOAD_DSP:
         cmd_load_dsp();
         break;
+      case CMD_START_SPC:
+        cmd_start_spc();
+        break;
+      case CMD_SPC_CHUNK:
+        cmd_spc_chunk();
+        break;
+      case CMD_PLAY:
+        cmd_play();
+        break;
     }
   }
 
-  /*
-  if (state == STATE_INIT) {
-    spc_reset();
-    state = STATE_READY;
-  } else if (state == STATE_READY && Serial.available()) {
-    initDsp();
-    state = STATE_TXFR;
-  } else if (state == STATE_TXFR) {
-    unsigned char buffer[0xFF];
-    Serial.println("Receiving zero page data (SEND)");
-    readSerialBuffer(buffer, 0x100);
-
-    // Write page 0 of SPC data
-    spc_begin_transfer(0x0002);
-
-    // Leave the first two bytes alone and also don't touch the register addresses
-    unsigned short checksum = 0;
-    Serial.println("Sending zero page data");
-    for (int i = 2; i < 0xF0; i++) {
-      spc_write(PORT_1, buffer[i]);
-      spc_write(PORT_0, i - 2);
-      spc_zero_wait(i - 2);
-    }
-
-    Serial.println("Zero page data written");
-    Serial.println("Receiving SPC data (SEND)");
-
-    spc_begin_chunk(0x0100);
-
-    checksum = 0;
-    unsigned short currentAddr = 0x100;
-    unsigned long start = micros();
-    uint8_t port0Check = 0;
-    while (currentAddr > 0) {
-      while (Serial.available() == 0);
-      unsigned char data = Serial.read();
-      port0Check = currentAddr & 0xFF;
-      spc_write(PORT_1, data);
-      spc_write(PORT_0, port0Check);
-      spc_zero_wait(port0Check);
-
-      checksum = (checksum + data) & 0xFF;
-
-      currentAddr++;
-    }
-
-    Serial.println(micros() - start);
-
-    Serial.print("SPC data written (");
-    Serial.print(checksum);
-    Serial.println("). Starting playback");
-    spc_end_transfer(0xE6D0);
-    Serial.println("I've done all I can, boss");
-
-    spc_write(PORT_3, 0x01);
-    spc_write(PORT_0, 0x01);
-
-    unsigned short bail = 512;
-    while (spc_read(PORT_0) != 0x53 && --bail > 0);
-
-    spc_write(PORT_0, 0x00);
-    spc_write(PORT_1, 0x00);
-    spc_write(PORT_2, 0x00);
-    spc_write(PORT_3, 0x00);
-
-    if (bail == 0) {
-      Serial.println("Go to bed");
-      Serial.println(checksum);
-    }
-    state = 100;
-  }
-  */
 }
